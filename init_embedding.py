@@ -66,19 +66,49 @@ class JsspEdgeEmbedding(nn.Module):
             "https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html."
         )
     
-    def forward(self, td, init_embeddings: Tensor):
-        cost_matrix = get_distance_matrix(td["locs"])
+    def forward(self, td:TensorDict, init_embeddings: Tensor):
+        proc_times = td['proc_times'] 
         batch = self._proc_times_to_graph(proc_times, init_embeddings)
         return batch
     
     def _make_edge_attributes(self, proc_times:Tensor,num_machines:int):
-        # pos_in_job = pos_in_job.squeeze(0) #(bs, operations) (operations)
-        # pos_in_job.reshape((-1,3))
-        # pos_in_job = pos_in_job.reshape(-1, self.num_machines())  ()
-        num_ops = proc_times.shape[2]
-        nub_jobs = num_ops // num_machines
+        '''
+        Docstring for _make_edge_attributes
+        
+        :param self: Description
+        :param proc_times: Description
+        :type proc_times: Tensor
+        :param num_machines: Description
+        :type num_machines: int
+        '''
+        num_ops = proc_times.shape[1]
+        num_jobs = num_ops // num_machines
         op_ids = torch.arange(num_ops)
         op_ids = op_ids.view(num_jobs, num_machines) # view here is better cause .arange is contiguous...probably
+        src = op_ids[:,:-1]
+        dst = op_ids[:,1:]
+        edge_index = torch.stack([src.reshape(-1),dst.reshape(-1)],dim=0)
+        
+        #shitty ai solution
+        machine_mask = proc_times > 0  
+        machine_edges = []
+
+        for m in range(num_machines): 
+            ops = torch.where(machine_mask[m])[0]
+
+            if len(ops) > 1:
+                # create all pair combinations
+                pairs = torch.combinations(ops, r=2)
+
+                # make bidirectional
+                rev_pairs = pairs[:, [1, 0]]
+
+                all_pairs = torch.cat([pairs, rev_pairs], dim=0)
+
+                machine_edges.append(all_pairs) 
+                
+        machine_edge_index = torch.cat(machine_edges, dim=0).T
+        #shitty ai solution end 
         #return edge_index,edge_attr
         pass
     
@@ -93,7 +123,7 @@ class JsspEdgeEmbedding(nn.Module):
         num_machines = batch_proc_times.shape[1] # 
         for index, proc_times in enumerate(batch_proc_times): 
             # insert get edge index logic plus edge attribute 
-            edge_index,edge_attr = self._make_edge_attributes(num_machines)
+            edge_index,edge_attr = self._make_edge_attributes(proc_times,num_machines=num_machines)
             graph = Data(
                 x=init_embeddings[index], edge_index=edge_index, edge_attr=edge_attr
             )
