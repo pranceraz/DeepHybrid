@@ -1,9 +1,11 @@
 import torch
+from torch import Tensor
 import torch.nn as nn
 from tensordict import TensorDict
 from types import UnionType
 try:
     from torch_geometric.data import Batch, Data
+    from torch_geometric.utils import to_undirected
 except ImportError:
     Batch = Data = None
 
@@ -68,16 +70,19 @@ class JsspEdgeEmbedding(nn.Module):
         cost_matrix = get_distance_matrix(td["locs"])
         batch = self._proc_times_to_graph(proc_times, init_embeddings)
         return batch
-    def _make_edge_attributes(self):
-        graph_data = []
-        graph = Data(
-                x=init_embeddings[index], edge_index=edge_index, edge_attr=edge_atrr        )
-            graph_data.append(graph)
-        batch = Batch.from_data_list(graph_data)
-        batch.edge_attr = self.edge_embed(batch.edge_attr)
-        return batch
     
-    def _proc_times_to_graph(self, batch_proc_times: Tensor, init_embeddings: Tensor):
+    def _make_edge_attributes(self, proc_times:Tensor,num_machines:int):
+        # pos_in_job = pos_in_job.squeeze(0) #(bs, operations) (operations)
+        # pos_in_job.reshape((-1,3))
+        # pos_in_job = pos_in_job.reshape(-1, self.num_machines())  ()
+        num_ops = proc_times.shape[2]
+        nub_jobs = num_ops // num_machines
+        op_ids = torch.arange(num_ops)
+        op_ids = op_ids.view(num_jobs, num_machines) # view here is better cause .arange is contiguous...probably
+        #return edge_index,edge_attr
+        pass
+    
+    def _proc_times_to_graph(self, batch_proc_times: Tensor, batch_pos_in_job: Tensor,init_embeddings: Tensor):
         """Convert batched cost_matrix to batched PyG graph, and calculate edge embeddings.
 
         Args:
@@ -85,14 +90,15 @@ class JsspEdgeEmbedding(nn.Module):
             init_embedding: init embeddings
         """
         graph_data = []
+        num_machines = batch_proc_times.shape[1] # 
         for index, proc_times in enumerate(batch_proc_times): 
             # insert get edge index logic plus edge attribute 
-
+            edge_index,edge_attr = self._make_edge_attributes(num_machines)
             graph = Data(
                 x=init_embeddings[index], edge_index=edge_index, edge_attr=edge_attr
             )
             graph_data.append(graph)
-
+        
         batch = Batch.from_data_list(graph_data)
         batch.edge_attr = self.edge_embed(batch.edge_attr)
         return batch
