@@ -96,17 +96,24 @@ class MyJSSPGenerator(Generator):
         assert (proc_times > 0).sum(1).eq(1).all()
         return proc_times.to(torch.float32)
     
-    # def _simulate_edge_feats(self,bs, n_ops_max):
-    #     '''edge_type ∈ {0, 1}
-    #         0 = precedence
-    #         1 = machine
-    #     '''
 
-    def _get_pos_in_job(self,bs) :
+    def _get_pos_in_job(self,bs):
         ''' returns a matrix of (*bs, operations) that cointains each operation's position in the job '''
         pos_in_job = torch.arange(0,self.num_mas).unsqueeze(0).unsqueeze(0)
         pos_in_job = pos_in_job.expand(size=(*bs,self.num_jobs,self.num_mas)).reshape(*bs,-1)
         return pos_in_job.to(torch.float32)
+    
+    def _get_job_machine_id(self,bs,proc_times):
+        '''returns a matrix of (*bs, operations) with each operation's corresponding machine_id  '''
+
+        device = proc_times.device
+        machine_id = proc_times.argmax(dim=1)
+        n_ops = proc_times.shape[2]
+        job_pattern = torch.arange(n_ops, device=device) // self.num_mas
+        job_id = job_pattern.unsqueeze(0).expand(*bs, -1)
+
+        return machine_id, job_id
+
     
     def _generate(self, batch_size) -> TensorDict:
         # simulate how many operations each job has
@@ -141,6 +148,7 @@ class MyJSSPGenerator(Generator):
         # simulate processing times for machine-operation pairs
         # (bs, num_mas, n_ops_max)
         proc_times = self._simulate_processing_times(batch_size, n_ops_max)
+        machine_id, job_id = self._get_job_machine_id(bs=batch_size,proc_times=proc_times)
         pos_in_job = self._get_pos_in_job(bs= batch_size)
         td = TensorDict(
             {
@@ -148,7 +156,8 @@ class MyJSSPGenerator(Generator):
                 "end_op_per_job": end_op_per_job,
                 "proc_times": proc_times,
                 "pad_mask": pad_mask,
-                "pos_in_job": pos_in_job
+                "pos_in_job": pos_in_job,
+                "machine_id": machine_id
             },
             batch_size=batch_size,
         )
