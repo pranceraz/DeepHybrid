@@ -1,5 +1,4 @@
 import torch
-from einops import reduce
 from tensordict.tensordict import TensorDict
 from torchrl.data import Bounded, Unbounded
 
@@ -45,21 +44,58 @@ class OperationSelectionEnv(RL4COEnvBase):
 
     def _reset(self, td: TensorDict = None, batch_size=None):
         td = td.clone()
+        device = td.device
         bs = td.batch_size
 
-        # Decode graph structure (job precedence)
+        # Decode precedence graph
         td, _ = self._decode_graph_structure(td)
 
         td.update({
-            "time": torch.zeros((*bs,)),
-            "start_times": torch.zeros((*bs, self.n_ops_max)),
-            "finish_times": torch.full((*bs, self.n_ops_max), INIT_FINISH),
-            "busy_until": torch.zeros((*bs, self.num_mas)),
-            "op_scheduled": torch.zeros((*bs, self.n_ops_max), dtype=torch.bool),
-            "job_in_process": torch.zeros((*bs, self.num_jobs), dtype=torch.bool),
-            "job_done": torch.zeros((*bs, self.num_jobs), dtype=torch.bool),
-            "done": torch.zeros((*bs, 1), dtype=torch.bool),
-            "current_node": torch.zeros((*bs, 1), dtype=torch.long),
+            "time": torch.zeros((*bs,), device=device),
+
+            "start_times": torch.zeros(
+                (*bs, self.n_ops_max), device=device
+            ),
+
+            "finish_times": torch.full(
+                (*bs, self.n_ops_max),
+                INIT_FINISH,
+                device=device
+            ),
+
+            "busy_until": torch.zeros(
+                (*bs, self.num_mas), device=device
+            ),
+
+            "op_scheduled": torch.zeros(
+                (*bs, self.n_ops_max),
+                dtype=torch.bool,
+                device=device
+            ),
+
+            "job_in_process": torch.zeros(
+                (*bs, self.num_jobs),
+                dtype=torch.bool,
+                device=device
+            ),
+
+            "job_done": torch.zeros(
+                (*bs, self.num_jobs),
+                dtype=torch.bool,
+                device=device
+            ),
+
+            "done": torch.zeros(
+                (*bs, 1),
+                dtype=torch.bool,
+                device=device
+            ),
+
+            "current_node": torch.zeros(
+                (*bs, 1),
+                dtype=torch.long,
+                device=device
+            ),
         })
 
         td["ops_ma_adj"] = (td["proc_times"] > 0).float()
@@ -70,30 +106,24 @@ class OperationSelectionEnv(RL4COEnvBase):
         return td
 
     # =====================================================
-    # ACTION MASK (NO FJSP DEPENDENCIES)
+    # ACTION MASK
     # =====================================================
+
     def get_action_mask(self, td):
 
-        # predecessor adjacency (bs, ops, ops)
-        pred_adj = td["ops_adj"][..., 0]
+        pred_adj = td["ops_adj"][..., 0]  # (bs, ops, ops)
 
-        # Get finish times expanded
-        finish = td["finish_times"].unsqueeze(1)  # (bs,1,ops)
+        finish = td["finish_times"].unsqueeze(1)
+        pred_finish_times = pred_adj * finish
 
-        # predecessor finish times masked
-        pred_finish_times = pred_adj * finish  # (bs, ops, ops)
-
-        # predecessor exists mask
         has_pred = pred_adj.sum(-1) > 0
 
-        # check all predecessors finished
-        preds_finished = (pred_finish_times <= td["time"].unsqueeze(1).unsqueeze(2)) | (pred_adj == 0)
-
-        # reduce across predecessor dimension
-        preds_finished = preds_finished.all(-1)
+        preds_finished = (
+            (pred_finish_times <= td["time"].unsqueeze(1).unsqueeze(2))
+            | (pred_adj == 0)
+        ).all(-1)
 
         ready = (~has_pred) | preds_finished
-
         not_scheduled = ~td["op_scheduled"]
 
         machine_of_op = td["ops_ma_adj"].argmax(1)
@@ -103,7 +133,6 @@ class OperationSelectionEnv(RL4COEnvBase):
         ) <= td["time"].unsqueeze(1)
 
         feasible = ready & not_scheduled & machine_free
-
         return feasible
 
     # =====================================================
@@ -112,8 +141,10 @@ class OperationSelectionEnv(RL4COEnvBase):
 
     def _step(self, td: TensorDict):
         td = td.clone()
+        device = td.device
         bs = td.size(0)
-        batch_idx = torch.arange(bs)
+
+        batch_idx = torch.arange(bs, device=device)
 
         op = td["action"]
 
@@ -130,11 +161,11 @@ class OperationSelectionEnv(RL4COEnvBase):
 
         td["current_node"] = op.unsqueeze(-1)
 
-        # Remove operation from machine availability
+        # Remove operation-machine compatibility
         td["proc_times"][batch_idx, :, op] = 0
         td["ops_ma_adj"] = (td["proc_times"] > 0).float()
 
-        # Advance time if needed
+        # Advance time if necessary
         td = self._advance_time(td)
 
         td["done"] = td["op_scheduled"].all(1, keepdim=True)
@@ -148,24 +179,25 @@ class OperationSelectionEnv(RL4COEnvBase):
 
     def _advance_time(self, td):
 
+        device = td.device
+
         while True:
 
-            # ALWAYS recompute mask first
             td.set("action_mask", self.get_action_mask(td))
 
             feasible = td["action_mask"].any(1)
             done = td["op_scheduled"].all(1)
-
             need_advance = ~feasible & ~done
 
             if not need_advance.any():
                 break
 
-            # advance to next machine release time
+            inf_tensor = torch.tensor(torch.inf, device=device)
+
             available_time = torch.where(
                 td["busy_until"] > td["time"].unsqueeze(1),
                 td["busy_until"],
-                torch.inf,
+                inf_tensor,
             ).min(1).values
 
             td["time"] = torch.where(
@@ -174,7 +206,6 @@ class OperationSelectionEnv(RL4COEnvBase):
                 td["time"],
             )
 
-            # free finished jobs
             finished = td["finish_times"] <= td["time"].unsqueeze(1)
             td["job_in_process"][finished.any(1)] = False
 
@@ -194,10 +225,13 @@ class OperationSelectionEnv(RL4COEnvBase):
         )
 
     # =====================================================
-    # GRAPH STRUCTURE (BORROWED CLEANLY FROM FJSP)
+    # GRAPH STRUCTURE
     # =====================================================
 
     def _decode_graph_structure(self, td):
+
+        device = td.device
+
         start = td["start_op_per_job"]
         end = td["end_op_per_job"]
         pad_mask = td["pad_mask"]
@@ -207,23 +241,38 @@ class OperationSelectionEnv(RL4COEnvBase):
             start, end, n_ops
         )
 
-        ops_job_bin_map[pad_mask.unsqueeze(1).expand_as(ops_job_bin_map)] = 0
+        ops_job_bin_map = ops_job_bin_map.to(device)
+        ops_job_map = ops_job_map.to(device)
+
+        ops_job_bin_map[
+            pad_mask.unsqueeze(1).expand_as(ops_job_bin_map)
+        ] = 0
 
         ops_seq_order = torch.sum(
-            ops_job_bin_map * (ops_job_bin_map.cumsum(2) - 1), dim=1
+            ops_job_bin_map * (ops_job_bin_map.cumsum(2) - 1),
+            dim=1,
         )
 
-        pred = torch.diag_embed(torch.ones(n_ops - 1), offset=-1)[None].expand(
-            *td.batch_size, -1, -1
-        )
+        pred = torch.diag_embed(
+            torch.ones(n_ops - 1, device=device),
+            offset=-1,
+        )[None].expand(*td.batch_size, -1, -1)
+
         pred = pred * ops_seq_order.gt(0).unsqueeze(-1)
 
-        succ = torch.diag_embed(torch.ones(n_ops - 1), offset=1)[None].expand(
-            *td.batch_size, -1, -1
-        )
+        succ = torch.diag_embed(
+            torch.ones(n_ops - 1, device=device),
+            offset=1,
+        )[None].expand(*td.batch_size, -1, -1)
+
         succ = succ * torch.cat(
-            (ops_seq_order[:, 1:], ops_seq_order.new_full((*td.batch_size, 1), 0)),
-            dim=1
+            (
+                ops_seq_order[:, 1:],
+                ops_seq_order.new_full(
+                    (*td.batch_size, 1), 0
+                ),
+            ),
+            dim=1,
         ).gt(0).unsqueeze(-1)
 
         ops_adj = torch.stack((pred, succ), dim=3)
