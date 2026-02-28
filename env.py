@@ -59,6 +59,7 @@ class OperationSelectionEnv(RL4COEnvBase):
             "job_in_process": torch.zeros((*bs, self.num_jobs), dtype=torch.bool),
             "job_done": torch.zeros((*bs, self.num_jobs), dtype=torch.bool),
             "done": torch.zeros((*bs, 1), dtype=torch.bool),
+            "current_node": torch.zeros((*bs, 1), dtype=torch.long),
         })
 
         td["ops_ma_adj"] = (td["proc_times"] > 0).float()
@@ -126,6 +127,8 @@ class OperationSelectionEnv(RL4COEnvBase):
         td["busy_until"][batch_idx, machine] = td["time"] + proc_time
         td["op_scheduled"][batch_idx, op] = True
         td["job_in_process"][batch_idx, job] = True
+
+        td["current_node"] = op.unsqueeze(-1)
 
         # Remove operation from machine availability
         td["proc_times"][batch_idx, :, op] = 0
