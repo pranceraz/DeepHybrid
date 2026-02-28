@@ -9,3 +9,5 @@ To adapt the the DeepACO paper for JSSP, we swapped the embeddings in the NARGNN
 Rl4CO does most of the heavy lifting!
 
 We retrofit the encoder and onto the policy.  
+
+The name hybrid comes from us starting out to build a *hybrid* of metaheuristic and RL solution to a JSSP. 
