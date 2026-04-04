@@ -63,7 +63,16 @@ class OperationSelectionEnv(RL4COEnvBase):
             ops = action[idx] # list of operations that were picked for each non wait sample
             machines = td["op_machine"][idx, ops] #crazy indexing magic pairwise indexing of operations to machine lookup matrix (vectorized) 
             proc = td["proc_time"][idx, ops]
+            start = torch.maximum(
+                td["time"][idx],
+                td["machine_available"][idx, machines]
+            )
+            td["machine_available"][idx, machines] = finish
 
+            # start_i = max(current_time_i, machine_free_time_i)
+            finish = start + proc
+            td["op_scheduled"][idx, ops] = True
+            
             pass
 
     
