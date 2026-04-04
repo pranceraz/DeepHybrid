@@ -38,14 +38,39 @@ class OperationSelectionEnv(RL4COEnvBase):
         return td 
 
     def _get_action_mask(self, td):
-        not_scheduled = ~td["op_scheduled"]
+        not_scheduled = ~td["op_scheduled"] # feasable actions are non-scheduled 
+
+
+        
         wait = torch.ones(td["time"].shape[0], 1 , dtype= torch.bool)
 
         return torch.cat([not_scheduled, wait], dim=1)
     
-    def _step(self, td):
-        return super().step(td)
+    def _step(self, td, action): # batch step is a better name 
+        
+        is_wait = action == self.WAIT # action is the also a tensor 
+        is_act = ~is_wait
+
+        if is_wait.any():
+            td_wait = {k: v[is_wait] for k, v in td.items()} # split out the samples that require waiting
+            td_wait = self._advance_time(td_wait) # advance the split samples
+            for k in td:
+                td[k][is_wait] = td_wait[k] # replace original samples with the split ones
+                
+        if is_act.any():
+            #make the ants do a step advance time choose the machine, mark operation as scheduled 
+            idx = is_act.nonzero().squeeze(-1) # index of non wait actions
+            ops = action[idx] # list of operations that were picked for each non wait sample
+            machines = td["op_machine"][idx, ops] #crazy indexing magic pairwise indexing of operations to machine lookup matrix (vectorized) 
+            proc = td["proc_time"][idx, ops]
+
+            pass
+
     
     def _advance_time(self,td):
-        pass
+        
+        next_time = td['machine_available'].min(dim =1).values
+        td['time'] = next_time
+
+        return td
     
