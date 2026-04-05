@@ -6,7 +6,7 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.envs.scheduling.fjsp.env import INIT_FINISH
 from rl4co.envs.scheduling.fjsp.utils import get_job_ops_mapping, calc_lower_bound
 
-class OperationSelectionEnv(RL4COEnvBase):
+class OperationSelectionEnv(): #(RL4COEnvBase):
     """
     My take on the JSSP env for ACO, vectorized, event driven with Delay!
     """
@@ -18,8 +18,8 @@ class OperationSelectionEnv(RL4COEnvBase):
 # ✅ action handling (including WAIT)
 # ✅ batching works
 # ✅ time moves forward correctly
-    def __init__(self, generator, num_ops, num_machines, stepwise_reward=False): # remove num ops num machines from here and take from generator when testing 
-        super().__init__(check_solution=False)
+    def __init__(self, num_ops, num_machines, stepwise_reward=False): # remove num ops num machines from here and take from generator when testing  and add genereator
+        #super().__init__(check_solution=False)
         self.num_ops = num_ops#generator.num_ops
         self.num_machines = num_machines
         self.WAIT = num_ops 
@@ -27,7 +27,7 @@ class OperationSelectionEnv(RL4COEnvBase):
     def _reset(self, bs):
         td = {}
         td["time"] = torch.zeros(bs)
-        td["machine_available"] = torch.zeros(bs, self.num_machines)
+        td["machine_available"] = torch.zeros(bs, self.num_machines) # time at which machine is available 
         td["op_scheduled"] = torch.zeros(bs, self.num_ops, dtype= torch.bool)
         
         #testing random assignment
@@ -38,10 +38,7 @@ class OperationSelectionEnv(RL4COEnvBase):
         return td 
 
     def _get_action_mask(self, td):
-        not_scheduled = ~td["op_scheduled"] # feasable actions are non-scheduled 
-
-
-        
+        not_scheduled = ~td["op_scheduled"] # feasable actions are non-scheduled       
         wait = torch.ones(td["time"].shape[0], 1 , dtype= torch.bool)
 
         return torch.cat([not_scheduled, wait], dim=1)
@@ -67,19 +64,47 @@ class OperationSelectionEnv(RL4COEnvBase):
                 td["time"][idx],
                 td["machine_available"][idx, machines]
             )
-            td["machine_available"][idx, machines] = finish
 
             # start_i = max(current_time_i, machine_free_time_i)
             finish = start + proc
-            td["op_scheduled"][idx, ops] = True
             
-            pass
+            td["machine_available"][idx, machines] = finish
+            td["op_scheduled"][idx, ops] = True
 
-    
+        mask = self._get_action_mask(td)[:, :-1] # this is to remove the wait column _get_action mask returns [bs,2] where 2 is feasable and wait 
+        not_feasable = ~mask.any(1) # mask.shape = (batch_size, num_ops)
+
+        if not_feasable.any():
+            td_not_feasable = {k: v [not_feasable] for k, v in td.items()} # split out non feasable samples 
+
+            # advance time in no feasable action samples
+            td_not_feasable = self._advance_time(td_not_feasable)
+
+            # add no feasable samples into original td
+            for k,v in td:
+                td[k][not_feasable] = td_not_feasable[k] 
+
+        td["action_mask"] = self._get_action_mask(td)
+        return td
     def _advance_time(self,td):
         
         next_time = td['machine_available'].min(dim =1).values
         td['time'] = next_time
 
         return td
-    
+    def _get_reward(self,td):
+        pass
+
+
+env = OperationSelectionEnv(num_ops=3, num_machines= 2)
+td = env._reset(bs=2)
+print(td)
+action = torch.tensor([0, 3]) 
+# sample 0 → op 0
+# sample 1 → WAIT (assuming WAIT = 3)
+td = env._step(td, action)
+action = torch.tensor([3, 3])
+td = env._step(td, action)
+print("time:", td["time"])
+print("machine_available:", td["machine_available"])
+print("op_scheduled:", td["op_scheduled"])
