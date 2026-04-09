@@ -7,7 +7,7 @@ from rl4co.envs.common.utils import Generator
 from rl4co.envs.scheduling.fjsp.env import INIT_FINISH
 from rl4co.envs.scheduling.fjsp.utils import get_job_ops_mapping, calc_lower_bound
 
-class OperationSelectionEnv(): #(RL4COEnvBase):
+class OperationSelectionEnv(RL4COEnvBase):
     """
     My take on the JSSP env for ACO, vectorized, event driven with Delay!
     """
@@ -52,7 +52,7 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
         td["action_mask"] = self._get_action_mask(td)
         return td 
 
-    def _get_action_mask(self, td):
+    def _get_action_mask(self, td: TensorDict):
         
         bs = td["time"].shape[0]
         allowed = torch.zeros(bs, self.num_ops, dtype=torch.bool, device=self.device)
@@ -66,16 +66,27 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
 
             op = step + start
             valid = op <= end
-
-        allowed[batch_idx[valid], op[valid]] = True
+        
+            allowed[batch_idx[valid], op[valid]] = True # bullshit indexing 
 
         # remove already scheduled  
         feasible = allowed & (~td["op_scheduled"])
+
+        machines = td["op_machine"]#(bs, num_ops)
+        #machine available is (bs, machines)
+        machine_ready = td["machine_available"].gather(1, machines) # when each machine will be ready 
+
+        current_time = td["time"].unsqueeze(1) #-> (bs,1) # BROADCASTING
+
+        machine_free = machine_ready <= current_time
+
+        feasible = feasible & machine_free
+
         wait = torch.ones(bs, 1, dtype= torch.bool, device=self.device)
         
         return torch.cat([feasible, wait], dim=1)
     
-    def _step(self, td, action): # batch step is a better name 
+    def _step(self, td: TensorDict, action): # batch step is a better name 
         
         is_wait = action == self.WAIT # action is the also a tensor 
         is_act = ~is_wait
@@ -111,7 +122,7 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
         mask = self._get_action_mask(td)[:, :-1] # this is to remove the wait column _get_action mask returns [bs,2] where 2 is feasable and wait 
         not_feasible = ~mask.any(1) # mask.shape = (batch_size, num_ops)
 
-        if not_feasible.any():
+        if not_feasible.any(): # makes time jump within the step if no feasable actions after doing one 
             td_not_feasible = {k: v [not_feasible] for k, v in td.items()} # split out non feasable samples 
 
             # advance time in no feasable action samples
@@ -121,27 +132,57 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
             for k in td:
                 td[k][not_feasible] = td_not_feasible[k] 
 
-        td["action_mask"] = self._get_action_mask(td)
-        return td
-    def _advance_time(self,td):
-        
-        next_time = td['machine_available'].min(dim =1).values
-        td['time'] = next_time
+        done = self._get_done(td)
+
+        reward = torch.zeros_like(done, dtype=torch.float32)
+
+        td.update({
+            "action_mask": self._get_action_mask(td),
+            "done": done,
+            "reward": reward,
+        })
 
         return td
-    def _get_reward(self,td):
-        pass
 
+    
+    def _advance_time(self, td):
 
-# env = OperationSelectionEnv(num_ops=3, num_machines= 2)
-# td = env._reset(bs=2)
-# print(td)
-# action = torch.tensor([0, 3]) 
-# # sample 0 → op 0
-# # sample 1 → WAIT (assuming WAIT = 3)
-# td = env._step(td, action)
-# action = torch.tensor([3, 1])
-# td = env._step(td, action)
-# print("time:", td["time"])
-# print("machine_available:", td["machine_available"])
-# print("op_scheduled:", td["op_scheduled"])
+        current_time = td["time"].unsqueeze(1)  # (bs, 1)
+
+        machine_times = td["machine_available"]  # (bs, num_machines)
+
+        # Mask out machines that are already available NOW or in the past
+        future_times = machine_times.clone()
+        future_times[future_times <= current_time] = float("inf")
+
+        # Get next event (earliest future machine completion)
+        next_time = future_times.min(dim=1).values
+
+        td["time"] = next_time
+
+        return td
+    
+    def _get_reward(self, td, actions=None):
+        done = td["op_scheduled"].all(dim=1)
+
+        makespan = td["machine_available"].max(dim=1).values
+        reward = -makespan
+
+        reward[~done] = 0.0  # safety for partial batches
+        return reward
+
+    def _get_done(self, td):
+        return td["op_scheduled"].all(dim=1)
+    
+
+    # def check_solution_validity(self, td):
+    #     """
+    #     Basic JSSP validity check
+    #     """
+
+    #     # all ops scheduled
+    #     assert td["op_scheduled"].all(), "Some ops not scheduled"
+
+    #     # each op scheduled exactly once
+    #     assert (td["op_scheduled"].sum(dim=1) == self.num_ops).all(), \
+    #         "Invalid scheduling count"
