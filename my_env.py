@@ -54,6 +54,11 @@ class OperationSelectionEnv(RL4COEnvBase):
         td["op_to_job"] = op_to_job
         
         td["action_mask"] = self._get_action_mask(td)
+        td["current_node"] = torch.zeros(
+            (*bs, 1),
+            dtype=torch.long,
+            device=device
+        )
         return td 
 
     # def _get_action_mask(self, td: TensorDict):
@@ -153,6 +158,7 @@ class OperationSelectionEnv(RL4COEnvBase):
 
             #advance job pointer
             job = td["op_to_job"][idx, ops]
+            td["current_node"][idx] = ops.unsqueeze(-1)
             td["job_next_step"][idx, job] += 1
             
 
