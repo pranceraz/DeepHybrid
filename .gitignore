@@ -209,3 +209,4 @@ __marimo__/
 #test.py
 test.py
 net.py
+.venv
