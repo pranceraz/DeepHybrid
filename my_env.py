@@ -26,7 +26,7 @@ class OperationSelectionEnv(RL4COEnvBase):
         "cuda" if torch.cuda.is_available() else "cpu"
         )
         self.rng = torch.Generator(device = self.device)
-        self.rng.manual_seed(0)
+        # self.rng.manual_seed(0)
         
         self.WAIT = self.num_ops
     def _reset(self, bs):
