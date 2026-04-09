@@ -121,73 +121,77 @@ class OperationSelectionEnv(RL4COEnvBase):
 
         feasible = feasible & machine_free
 
-        wait = torch.ones(bs, 1, dtype=torch.bool, device=device)
+        # wait = torch.ones(bs, 1, dtype=torch.bool, device=device)
 
-        return torch.cat([feasible, wait], dim=1)
+        # return torch.cat([feasible, wait], dim=1)
+        return feasible
     
     def _step(self, td: TensorDict): # batch step is a better name 
-        
-        action = td["action"]
-        is_wait = action == self.WAIT # action is the also a tensor 
-        is_act = ~is_wait
+            
+            action = td["action"]
+            is_act = torch.ones_like(action, dtype=torch.bool)  # all actions are valid ops now
 
-        if is_wait.any():
-            # td_wait = {k: v[is_wait] for k, v in td.items()} 
-            td_wait = td[is_wait]# split out the samples that require waiting
-            td_wait = self._advance_time(td_wait) # advance the split samples
-            # for k in td:
-            #     td[k][is_wait] = td_wait[k] 
-            td[is_wait] = td_wait# replace original samples with the split ones
+            # action = td["action"]
+            # is_wait = action == self.WAIT # action is the also a tensor 
+            # is_act = ~is_wait
+
+            # if is_wait.any():
+            #     # td_wait = {k: v[is_wait] for k, v in td.items()} 
+            #     td_wait = td[is_wait]# split out the samples that require waiting
+            #     td_wait = self._advance_time(td_wait) # advance the split samples
+            #     # for k in td:
+            #     #     td[k][is_wait] = td_wait[k] 
+            #     td[is_wait] = td_wait# replace original samples with the split ones
+                    
+            if is_act.any():
+                #make the ants do a step advance time choose the machine, mark operation as scheduled 
+                idx = torch.arange(td.batch_size[0], device=td.device) # index of all samples
+                ops = action # list of operations that were picked for each sample
+                machines = td["op_machine"][idx, ops] #crazy indexing magic pairwise indexing of operations to machine lookup matrix (vectorized) 
+                proc = td["proc_time"][idx, ops]
+                start = torch.maximum(
+                    td["time"],
+                    td["machine_available"][idx, machines]
+                )
+
+                # start_i = max(current_time_i, machine_free_time_i)
+                finish = start + proc
                 
-        if is_act.any():
-            #make the ants do a step advance time choose the machine, mark operation as scheduled 
-            idx = is_act.nonzero().squeeze(-1) # index of non wait actions
-            ops = action[idx] # list of operations that were picked for each non wait sample
-            machines = td["op_machine"][idx, ops] #crazy indexing magic pairwise indexing of operations to machine lookup matrix (vectorized) 
-            proc = td["proc_time"][idx, ops]
-            start = torch.maximum(
-                td["time"][idx],
-                td["machine_available"][idx, machines]
-            )
+                td["machine_available"][idx, machines] = finish
+                td["op_scheduled"][idx, ops] = True
 
-            # start_i = max(current_time_i, machine_free_time_i)
-            finish = start + proc
-            
-            td["machine_available"][idx, machines] = finish
-            td["op_scheduled"][idx, ops] = True
+                #advance job pointer
+                job = td["op_to_job"][idx, ops]
+                td["current_node"][idx] = ops.unsqueeze(-1)
+                td["job_next_step"][idx, job] += 1
+                
 
-            #advance job pointer
-            job = td["op_to_job"][idx, ops]
-            td["current_node"][idx] = ops.unsqueeze(-1)
-            td["job_next_step"][idx, job] += 1
-            
+            mask = self._get_action_mask(td)  # no wait column anymore
+            not_feasible = ~mask.any(1) # mask.shape = (batch_size, num_ops)
 
-        mask = self._get_action_mask(td)[:, :-1] # this is to remove the wait column _get_action mask returns [bs,2] where 2 is feasable and wait 
-        not_feasible = ~mask.any(1) # mask.shape = (batch_size, num_ops)
+            if not_feasible.any(): # makes time jump within the step if no feasable actions after doing one 
+                # td_not_feasible = {k: v [not_feasible] for k, v in td.items()}
+                td_not_feasible = td[not_feasible] # split out non feasable samples 
 
-        if not_feasible.any(): # makes time jump within the step if no feasable actions after doing one 
-            # td_not_feasible = {k: v [not_feasible] for k, v in td.items()}
-            td_not_feasible = td[not_feasible] # split out non feasable samples 
+                # advance time in no feasable action samples
+                td_not_feasible = self._advance_time(td_not_feasible)
 
-            # advance time in no feasable action samples
-            td_not_feasible = self._advance_time(td_not_feasible)
+                # add no feasable samples into original td
+                # for k in td:
+                #     td[k][not_feasible] = td_not_feasible[k] 
+                td[not_feasible] = td_not_feasible
 
-            # add no feasable samples into original td
-            # for k in td:
-            #     td[k][not_feasible] = td_not_feasible[k] 
-            td[not_feasible] = td_not_feasible
+            done = self._get_done(td)
 
-        done = self._get_done(td)
+            reward = torch.zeros((*td.batch_size, 1), device=td.device)
 
-        reward = torch.zeros((*td.batch_size, 1), device=td.device)
+            td.update({
+                "action_mask": self._get_action_mask(td),
+                "done": done,
+                "reward": reward,
+            })
 
-        td.update({
-            "action_mask": self._get_action_mask(td),
-            "done": done,
-            "reward": reward,
-        })
-
-        return td
+            return td
 
     
     def _advance_time(self, td: TensorDict):
