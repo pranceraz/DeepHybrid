@@ -3,6 +3,7 @@ from tensordict.tensordict import TensorDict
 from torchrl.data import Bounded, Unbounded
 
 from rl4co.envs.common.base import RL4COEnvBase
+from rl4co.envs.common.utils import Generator
 from rl4co.envs.scheduling.fjsp.env import INIT_FINISH
 from rl4co.envs.scheduling.fjsp.utils import get_job_ops_mapping, calc_lower_bound
 
@@ -15,33 +16,64 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
 
 # You are ONLY testing:
 
-# ✅ action handling (including WAIT)
-# ✅ batching works
-# ✅ time moves forward correctly
-    def __init__(self, num_ops, num_machines, stepwise_reward=False): # remove num ops num machines from here and take from generator when testing  and add genereator
+    def __init__(self, generator, device=None, stepwise_reward=False): # remove num ops num machines from here and take from generator when testing  and add genereator
         #super().__init__(check_solution=False)
-        self.num_ops = num_ops#generator.num_ops
-        self.num_machines = num_machines
-        self.WAIT = num_ops 
-
-    def _reset(self, bs):
-        td = {}
-        td["time"] = torch.zeros(bs)
-        td["machine_available"] = torch.zeros(bs, self.num_machines) # time at which machine is available 
-        td["op_scheduled"] = torch.zeros(bs, self.num_ops, dtype= torch.bool)
+        self.generator = generator
+        self.num_jobs = generator.num_jobs
+        self.num_machines = generator.num_mas
+        self.num_ops = generator.n_ops_max
+        self.device = device if device is not None else torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+        )
         
+        self.WAIT = self.num_ops
+    def _reset(self, bs):
+        td = self.generator._generate(batch_size=(bs,))
+        td = {k: v.to(self.device) for k, v in td.items()}
+        td["time"] = torch.zeros(bs, device=self.device)
+        td["machine_available"] = torch.zeros(bs, self.num_machines, device=self.device) # time at which machine is available 
+        td["op_scheduled"] = torch.zeros(bs, self.num_ops, dtype= torch.bool, device=self.device)
+        td["job_next_step"] = torch.zeros(bs, self.num_jobs, dtype= torch.long, device=self.device)
         #testing random assignment
-        td["op_machine"] = torch.randint(0,self.num_machines, (bs, self.num_ops))
-        td['proc_time'] = torch.randint(1,5, (bs,self.num_ops))
+        td["op_machine"] = td["machine_id"]
+        td['proc_time'] = td["proc_times"].max(1).values #(bs, num_ops)
+        ops = torch.arange(self.num_ops, device=self.device)
+
+        start = td["start_op_per_job"]  # (bs, num_jobs)
+        end = td["end_op_per_job"]
+
+        op_to_job = (
+            (ops.unsqueeze(0).unsqueeze(-1) >= start.unsqueeze(1)) &
+            (ops.unsqueeze(0).unsqueeze(-1) <= end.unsqueeze(1))
+        ).float().argmax(-1)
+
+        td["op_to_job"] = op_to_job
         
         td["action_mask"] = self._get_action_mask(td)
         return td 
 
     def _get_action_mask(self, td):
-        not_scheduled = ~td["op_scheduled"] # feasable actions are non-scheduled       
-        wait = torch.ones(td["time"].shape[0], 1 , dtype= torch.bool)
+        
+        bs = td["time"].shape[0]
+        allowed = torch.zeros(bs, self.num_ops, dtype=torch.bool, device=self.device)
+        batch_idx = torch.arange(bs, device=self.device)
 
-        return torch.cat([not_scheduled, wait], dim=1)
+        for j in range(self.num_jobs):
+
+            step = td["job_next_step"][:,j] #(bs, job)
+            start = td["start_op_per_job"][:,j]
+            end = td["end_op_per_job"][:, j]
+
+            op = step + start
+            valid = op <= end
+
+        allowed[batch_idx[valid], op[valid]] = True
+
+        # remove already scheduled  
+        feasible = allowed & (~td["op_scheduled"])
+        wait = torch.ones(bs, 1, dtype= torch.bool, device=self.device)
+        
+        return torch.cat([feasible, wait], dim=1)
     
     def _step(self, td, action): # batch step is a better name 
         
@@ -71,18 +103,23 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
             td["machine_available"][idx, machines] = finish
             td["op_scheduled"][idx, ops] = True
 
-        mask = self._get_action_mask(td)[:, :-1] # this is to remove the wait column _get_action mask returns [bs,2] where 2 is feasable and wait 
-        not_feasable = ~mask.any(1) # mask.shape = (batch_size, num_ops)
+            #advance job pointer
+            job = td["op_to_job"][idx, ops]
+            td["job_next_step"][idx, job] += 1
+            
 
-        if not_feasable.any():
-            td_not_feasable = {k: v [not_feasable] for k, v in td.items()} # split out non feasable samples 
+        mask = self._get_action_mask(td)[:, :-1] # this is to remove the wait column _get_action mask returns [bs,2] where 2 is feasable and wait 
+        not_feasible = ~mask.any(1) # mask.shape = (batch_size, num_ops)
+
+        if not_feasible.any():
+            td_not_feasible = {k: v [not_feasible] for k, v in td.items()} # split out non feasable samples 
 
             # advance time in no feasable action samples
-            td_not_feasable = self._advance_time(td_not_feasable)
+            td_not_feasible = self._advance_time(td_not_feasible)
 
             # add no feasable samples into original td
-            for k,v in td:
-                td[k][not_feasable] = td_not_feasable[k] 
+            for k in td:
+                td[k][not_feasible] = td_not_feasible[k] 
 
         td["action_mask"] = self._get_action_mask(td)
         return td
@@ -96,15 +133,15 @@ class OperationSelectionEnv(): #(RL4COEnvBase):
         pass
 
 
-env = OperationSelectionEnv(num_ops=3, num_machines= 2)
-td = env._reset(bs=2)
-print(td)
-action = torch.tensor([0, 3]) 
-# sample 0 → op 0
-# sample 1 → WAIT (assuming WAIT = 3)
-td = env._step(td, action)
-action = torch.tensor([3, 3])
-td = env._step(td, action)
-print("time:", td["time"])
-print("machine_available:", td["machine_available"])
-print("op_scheduled:", td["op_scheduled"])
+# env = OperationSelectionEnv(num_ops=3, num_machines= 2)
+# td = env._reset(bs=2)
+# print(td)
+# action = torch.tensor([0, 3]) 
+# # sample 0 → op 0
+# # sample 1 → WAIT (assuming WAIT = 3)
+# td = env._step(td, action)
+# action = torch.tensor([3, 1])
+# td = env._step(td, action)
+# print("time:", td["time"])
+# print("machine_available:", td["machine_available"])
+# print("op_scheduled:", td["op_scheduled"])
