@@ -23,7 +23,7 @@ class OperationSelectionEnv(RL4COEnvBase):
         self.n_ops_max = generator.n_ops_max
         self.stepwise_reward = stepwise_reward
         self._make_spec()
-
+        
     # =====================================================
     # SPECS
     # =====================================================
