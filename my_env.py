@@ -111,7 +111,7 @@ class OperationSelectionEnv(RL4COEnvBase):
         allowed = torch.zeros(bs, self.num_ops, dtype=torch.bool, device=device)
         allowed.scatter_(1, op_safe, valid)
 
-        feasible = allowed & (~td["op_scheduled"])
+        not_scheduled = ~td["op_scheduled"]
 
         machines = td["op_machine"]
         machine_ready = td["machine_available"].gather(1, machines)
@@ -119,11 +119,8 @@ class OperationSelectionEnv(RL4COEnvBase):
         current_time = td["time"].unsqueeze(1)
         machine_free = machine_ready <= current_time
 
-        feasible = feasible & machine_free
+        feasible = allowed & not_scheduled & machine_free
 
-        # wait = torch.ones(bs, 1, dtype=torch.bool, device=device)
-
-        # return torch.cat([feasible, wait], dim=1)
         return feasible
     
     def _step(self, td: TensorDict): # batch step is a better name 
@@ -180,13 +177,14 @@ class OperationSelectionEnv(RL4COEnvBase):
                 # for k in td:
                 #     td[k][not_feasible] = td_not_feasible[k] 
                 td[not_feasible] = td_not_feasible
+                mask = self._get_action_mask(td)
 
             done = self._get_done(td)
 
             reward = torch.zeros((*td.batch_size, 1), device=td.device)
 
             td.update({
-                "action_mask": self._get_action_mask(td),
+                "action_mask": mask,
                 "done": done,
                 "reward": reward,
             })
