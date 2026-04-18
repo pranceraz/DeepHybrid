@@ -210,3 +210,8 @@ __marimo__/
 test.py
 net.py
 .venv
+
+test*
+
+.codex
+lightning_logs

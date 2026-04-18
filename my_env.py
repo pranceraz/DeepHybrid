@@ -16,7 +16,7 @@ class OperationSelectionEnv(RL4COEnvBase):
 
 # You are ONLY testing:
 
-    def __init__(self, generator, stepwise_reward=False): # remove num ops num machines from here and take from generator when testing  and add genereator
+    def __init__(self, generator, stepwise_reward=False):
         super().__init__(check_solution=False)
         self.generator = generator
         self.num_jobs = generator.num_jobs
@@ -61,70 +61,44 @@ class OperationSelectionEnv(RL4COEnvBase):
         )
         return td 
 
-    # def _get_action_mask(self, td: TensorDict):
-    #     device = td.device
-    #     bs = td.batch_size[0]
-    #     allowed = torch.zeros(bs, self.num_ops, dtype=torch.bool, device=device)
-    #     batch_idx = torch.arange(bs, device=device)
-
-    #     for j in range(self.num_jobs):
-
-    #         step = td["job_next_step"][:,j] #(bs, job)
-    #         start = td["start_op_per_job"][:,j]
-    #         end = td["end_op_per_job"][:, j]
-
-    #         op = step + start
-    #         valid = op <= end
-        
-    #         allowed[batch_idx[valid], op[valid]] = True # bullshit indexing 
-
-    #     # remove already scheduled  
-    #     feasible = allowed & (~td["op_scheduled"])
-
-    #     machines = td["op_machine"]#(bs, num_ops)
-    #     #machine available is (bs, machines)
-    #     machine_ready = td["machine_available"].gather(1, machines) # when each machine will be ready 
-
-    #     current_time = td["time"].unsqueeze(1) #-> (bs,1) # BROADCASTING
-
-    #     machine_free = machine_ready <= current_time
-
-    #     feasible = feasible & machine_free
-
-    #     wait = torch.ones(bs, 1, dtype= torch.bool, device=device)
-        
-    #     return torch.cat([feasible, wait], dim=1)
     def _get_action_mask(self, td: TensorDict):
         device = td.device
         bs = td.batch_size[0]
-
-        step = td["job_next_step"]
-        start = td["start_op_per_job"]
-        end = td["end_op_per_job"]
-
-        op = step + start
-        valid = op <= end
-
-        op_safe = op.clone()
-        op_safe[~valid] = 0
-
         allowed = torch.zeros(bs, self.num_ops, dtype=torch.bool, device=device)
-        allowed.scatter_(1, op_safe, valid)
+        batch_idx = torch.arange(bs, device=device)
 
-        not_scheduled = ~td["op_scheduled"]
+        for j in range(self.num_jobs):
 
-        machines = td["op_machine"]
-        machine_ready = td["machine_available"].gather(1, machines)
+            step = td["job_next_step"][:,j] #(bs, job)
+            start = td["start_op_per_job"][:,j]
+            end = td["end_op_per_job"][:, j]
 
-        current_time = td["time"].unsqueeze(1)
+            op = step + start
+            valid = op <= end
+        
+            allowed[batch_idx[valid], op[valid]] = True # bullshit indexing 
+
+        # remove already scheduled  
+        feasible = allowed & (~td["op_scheduled"])
+
+        machines = td["op_machine"]#(bs, num_ops)
+        #machine available is (bs, machines)
+        machine_ready = td["machine_available"].gather(1, machines) # when each machine will be ready 
+
+        current_time = td["time"].unsqueeze(1) #-> (bs,1) # BROADCASTING
+
         machine_free = machine_ready <= current_time
 
-        feasible = allowed & not_scheduled & machine_free
+        feasible = feasible & machine_free
 
+        # wait = torch.ones(bs, 1, dtype= torch.bool, device=device)
+        
+        # return torch.cat([feasible, wait], dim=1)
         return feasible
+
     
     def _step(self, td: TensorDict): # batch step is a better name 
-            
+            td = td.clone()
             action = td["action"]
             is_act = torch.ones_like(action, dtype=torch.bool)  # all actions are valid ops now
 
@@ -164,20 +138,33 @@ class OperationSelectionEnv(RL4COEnvBase):
                 
 
             mask = self._get_action_mask(td)  # no wait column anymore
-            not_feasible = ~mask.any(1) # mask.shape = (batch_size, num_ops)
+            # not_feasible = ~mask.any(1) # mask.shape = (batch_size, num_ops)
 
-            if not_feasible.any(): # makes time jump within the step if no feasable actions after doing one 
-                # td_not_feasible = {k: v [not_feasible] for k, v in td.items()}
-                td_not_feasible = td[not_feasible] # split out non feasable samples 
+            # if not_feasible.any(): # makes time jump within the step if no feasable actions after doing one 
+            #     # td_not_feasible = {k: v [not_feasible] for k, v in td.items()}
+            #     td_not_feasible = td[not_feasible] # split out non feasable samples 
 
-                # advance time in no feasable action samples
-                td_not_feasible = self._advance_time(td_not_feasible)
+            #     # advance time in no feasable action samples
+            #     td_not_feasible = self._advance_time(td_not_feasible)
 
-                # add no feasable samples into original td
-                # for k in td:
-                #     td[k][not_feasible] = td_not_feasible[k] 
-                td[not_feasible] = td_not_feasible
+            #     # add no feasable samples into original td
+            #     # for k in td:
+            #     #     td[k][not_feasible] = td_not_feasible[k] 
+            #     td[not_feasible] = td_not_feasible
+            #     mask = self._get_action_mask(td)
+
+
+            # Keep advancing unfinished rows until at least one action exists.
+            done_flat = self._get_done(td).squeeze(-1)
+            need_advance = (~mask.any(1)) & (~done_flat)
+            while need_advance.any():
+                td_nf = td[need_advance]
+                td_nf = self._advance_time(td_nf)
+                td[need_advance] = td_nf
+
                 mask = self._get_action_mask(td)
+                done_flat = self._get_done(td).squeeze(-1)
+                need_advance = (~mask.any(1)) & (~done_flat)
 
             done = self._get_done(td)
 
@@ -190,6 +177,7 @@ class OperationSelectionEnv(RL4COEnvBase):
             })
 
             return td
+            # return TensorDict({"next": td}, batch_size=td.batch_size)
 
     
     def _advance_time(self, td: TensorDict):
@@ -221,7 +209,8 @@ class OperationSelectionEnv(RL4COEnvBase):
         done = td["op_scheduled"].all(dim=1)
 
         makespan = td["machine_available"].max(dim=1).values
-        reward = -makespan.unsqueeze(-1)
+        # Keep reward 1D [batch] to match RL4CO/DeepACO loss expectations.
+        reward = -makespan
 
         reward[~done] = 0.0  # safety for partial batches
         return reward
@@ -229,15 +218,3 @@ class OperationSelectionEnv(RL4COEnvBase):
     def _get_done(self, td):
         return td["op_scheduled"].all(dim=1, keepdim=True)
     
-
-    # def check_solution_validity(self, td):
-    #     """
-    #     Basic JSSP validity check
-    #     """
-
-    #     # all ops scheduled
-    #     assert td["op_scheduled"].all(), "Some ops not scheduled"
-
-    #     # each op scheduled exactly once
-    #     assert (td["op_scheduled"].sum(dim=1) == self.num_ops).all(), \
-    #         "Invalid scheduling count"
