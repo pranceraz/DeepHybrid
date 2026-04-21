@@ -36,6 +36,7 @@ class OperationSelectionEnv(RL4COEnvBase):
 
         td["time"] = torch.zeros((*bs,), device=device)
         td["machine_available"] = torch.zeros((*bs, self.num_machines), device=device) # time at which machine is available 
+        td["job_available"] = torch.zeros((*bs, self.num_jobs), device=device) # time at which each job can start its next op
         td["op_scheduled"] = torch.zeros((*bs, self.num_ops), dtype= torch.bool, device=device)
         td["job_next_step"] = torch.zeros((*bs, self.num_jobs), dtype= torch.long, device=device)
         #testing random assignment
@@ -84,12 +85,15 @@ class OperationSelectionEnv(RL4COEnvBase):
         machines = td["op_machine"]#(bs, num_ops)
         #machine available is (bs, machines)
         machine_ready = td["machine_available"].gather(1, machines) # when each machine will be ready 
+        jobs = td["op_to_job"]
+        job_ready = td["job_available"].gather(1, jobs) # when each job is ready for its next op
 
         current_time = td["time"].unsqueeze(1) #-> (bs,1) # BROADCASTING
 
         machine_free = machine_ready <= current_time
+        job_free = job_ready <= current_time
 
-        feasible = feasible & machine_free
+        feasible = feasible & machine_free & job_free
 
         # wait = torch.ones(bs, 1, dtype= torch.bool, device=device)
         
@@ -119,20 +123,24 @@ class OperationSelectionEnv(RL4COEnvBase):
                 idx = torch.arange(td.batch_size[0], device=td.device) # index of all samples
                 ops = action # list of operations that were picked for each sample
                 machines = td["op_machine"][idx, ops] #crazy indexing magic pairwise indexing of operations to machine lookup matrix (vectorized) 
+                job = td["op_to_job"][idx, ops]
                 proc = td["proc_time"][idx, ops]
                 start = torch.maximum(
-                    td["time"],
-                    td["machine_available"][idx, machines]
+                    torch.maximum(
+                        td["time"],
+                        td["machine_available"][idx, machines]
+                    ),
+                    td["job_available"][idx, job]
                 )
 
                 # start_i = max(current_time_i, machine_free_time_i)
                 finish = start + proc
                 
                 td["machine_available"][idx, machines] = finish
+                td["job_available"][idx, job] = finish
                 td["op_scheduled"][idx, ops] = True
 
                 #advance job pointer
-                job = td["op_to_job"][idx, ops]
                 td["current_node"][idx] = ops.unsqueeze(-1)
                 td["job_next_step"][idx, job] += 1
                 
